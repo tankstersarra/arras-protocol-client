@@ -3,6 +3,12 @@
   respawn spam, unsafe validation replay, post-spawn validation abuse, and unnecessary movement packet flooding.
   >
   > Some packet paths were kept strict on purpose. It does not expose every anti-bot-sensitive path just so people can spam servers
+--------------------------------
+> [!NOTE]
+> 
+  > There may also be glitches with movement, respawn timing, tank paths, packet compatibility, and mode-specific coordinate scaling. Features like override movement, follow-mouse behavior, live parent following, and other aggressive automation controls are not implemented yet
+  >
+  > I will keep improving stability, tank support, movement, respawn behavior, and controller features over time.
 
 # arras-protocol-client
 
