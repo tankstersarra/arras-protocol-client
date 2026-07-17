@@ -39,6 +39,28 @@ const DEFAULT_SPAWN_EXTRA_FIELDS = [0, 0];
 const DEFAULT_SPAWN_PACKET = Buffer.from([0x73, 0xc0, 0xc0, 0x01]);
 const MOVEMENT_ENABLED = process.env.ARRAS_PROTOCOL_MOVEMENT !== '0';
 const MOVEMENT_INTERVAL_MS = Number(process.env.ARRAS_MOVEMENT_INTERVAL_MS || 30);
+const MOVEMENT_JITTER_MS = Number(process.env.ARRAS_MOVEMENT_JITTER_MS || 8);
+const MOVEMENT_PHASE_JITTER_MS = Number(process.env.ARRAS_MOVEMENT_PHASE_JITTER_MS || 30);
+const MANUAL_FORMATION_SPREAD = Number(process.env.ARRAS_MANUAL_FORMATION_SPREAD || 0.35);
+const MANUAL_TARGET_SPREAD = Number(process.env.ARRAS_MANUAL_TARGET_SPREAD || 0);
+const MANUAL_TARGET_SPREAD_WOBBLE = Number(process.env.ARRAS_MANUAL_TARGET_SPREAD_WOBBLE || 0);
+const MANUAL_TARGET_SPREAD_REFRESH_MS = Number(process.env.ARRAS_MANUAL_TARGET_SPREAD_REFRESH_MS || 2600);
+const MANUAL_AIM_WITH_MOVEMENT = process.env.ARRAS_MANUAL_AIM_WITH_MOVEMENT === '1';
+const MANUAL_AIM_AXIS = Number(process.env.ARRAS_MANUAL_AIM_AXIS || 80);
+const MANUAL_AIM_SPREAD = Number(process.env.ARRAS_MANUAL_AIM_SPREAD || 3.5);
+const MANUAL_AIM_SPREAD_WOBBLE = Number(process.env.ARRAS_MANUAL_AIM_SPREAD_WOBBLE || 1.5);
+const MANUAL_AIM_SPREAD_REFRESH_MS = Number(process.env.ARRAS_MANUAL_AIM_SPREAD_REFRESH_MS || 2300);
+const CONTROL_AIM_MAX_AXIS = Number(process.env.ARRAS_CONTROL_AIM_MAX_AXIS || 96);
+const CONTROL_AIM_DEADZONE = Number(process.env.ARRAS_CONTROL_AIM_DEADZONE || 0.75);
+const FIRE_STAGGER_MS = Number(process.env.ARRAS_FIRE_STAGGER_MS || 180);
+const FIRE_MICRO_PAUSE_ENABLED = process.env.ARRAS_FIRE_MICRO_PAUSE !== '0';
+const FIRE_MICRO_PAUSE_MIN_MS = Number(process.env.ARRAS_FIRE_MICRO_PAUSE_MIN_MS || 45);
+const FIRE_MICRO_PAUSE_MAX_MS = Number(process.env.ARRAS_FIRE_MICRO_PAUSE_MAX_MS || 120);
+const FIRE_MICRO_PAUSE_INTERVAL_MIN_MS = Number(process.env.ARRAS_FIRE_MICRO_PAUSE_INTERVAL_MIN_MS || 1400);
+const FIRE_MICRO_PAUSE_INTERVAL_MAX_MS = Number(process.env.ARRAS_FIRE_MICRO_PAUSE_INTERVAL_MAX_MS || 2600);
+const STAT_BUILD_START_JITTER_MS = Number(process.env.ARRAS_STAT_BUILD_START_JITTER_MS || 650);
+const STAT_BUILD_STEP_JITTER_MS = Number(process.env.ARRAS_STAT_BUILD_STEP_JITTER_MS || 45);
+const MANUAL_CONTROL_INTERVAL_MS = Number(process.env.ARRAS_MANUAL_CONTROL_INTERVAL_MS || 90);
 const MANUAL_TARGET_AXIS_SCALE = Number(process.env.ARRAS_MANUAL_TARGET_AXIS_SCALE || 40);
 const MANUAL_TARGET_MAX_AXIS = Number(process.env.ARRAS_MANUAL_TARGET_MAX_AXIS || 18);
 const MANUAL_TARGET_STOP_DISTANCE = Number(process.env.ARRAS_MANUAL_TARGET_STOP_DISTANCE || 0.75);
@@ -48,14 +70,14 @@ const MANUAL_TARGET_MIN_HOLD_MS = Number(process.env.ARRAS_MANUAL_TARGET_MIN_HOL
 const TRUST_ESTIMATED_MANUAL_ARRIVAL = process.env.ARRAS_TRUST_ESTIMATED_MANUAL_ARRIVAL === '1';
 const MANUAL_TARGET_INVERT = process.env.ARRAS_MANUAL_TARGET_INVERT === '1';
 const MANUAL_TARGET_ESTIMATED_SPEED = Number(process.env.ARRAS_MANUAL_TARGET_ESTIMATED_SPEED || 7);
-const U_POSITION_MODE = String(process.env.ARRAS_USE_U_POSITION || 'raw').toLowerCase();
+const U_POSITION_MODE = String(process.env.ARRAS_USE_U_POSITION || 'filtered').toLowerCase();
 const USE_U_POSITION = !['0', 'false', 'off', 'none'].includes(U_POSITION_MODE);
 const TRUST_RAW_U_POSITION = ['1', 'true', 'raw', 'on'].includes(U_POSITION_MODE);
 const U_POSITION_ACCEPT_DISTANCE = Number(process.env.ARRAS_U_POSITION_ACCEPT_DISTANCE || 80);
 const U_POSITION_BLEND = Number(process.env.ARRAS_U_POSITION_BLEND || 0.18);
 const MANUAL_TARGET_X_SCALE = 30;
 const MANUAL_TARGET_Y_SCALE = 30;
-const MANUAL_SCALE_AUTO_CALIBRATE = process.env.ARRAS_MANUAL_SCALE_AUTO_CALIBRATE !== '0';
+const MANUAL_SCALE_AUTO_CALIBRATE = process.env.ARRAS_MANUAL_SCALE_AUTO_CALIBRATE === '1';
 const MANUAL_SCALE_CALIBRATE_DISTANCE = Number(process.env.ARRAS_MANUAL_SCALE_CALIBRATE_DISTANCE || 80);
 const MANUAL_SCALE_MIN = Number(process.env.ARRAS_MANUAL_SCALE_MIN || 20);
 const MANUAL_SCALE_MAX = Number(process.env.ARRAS_MANUAL_SCALE_MAX || 60);
@@ -89,6 +111,7 @@ const VALIDATION_R_ALPHABET = Array.from({ length: 64 }, (_, i) => String.fromCh
 const VALIDATION_R_HASH_PREFIX = process.env.ARRAS_R_HASH_PREFIX || '0000';
 const VALIDATION_R_MAX_ATTEMPTS = Number(process.env.ARRAS_R_MAX_ATTEMPTS || 1_000_000);
 let httpsProxyAgentCtorPromise = null;
+let nextClientLogId = 1;
 
 const P25519 = (1n << 255n) - 19n;
 
@@ -1268,12 +1291,19 @@ function clampByte(value, fallback = 0) {
   return Math.max(0, Math.min(255, Math.round(numeric)));
 }
 
-function encodeInputAxis(value) {
+function encodeInputNumber(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
-    return 0x80;
+    return Buffer.from([0]);
   }
-  return clampByte(0x80 - Math.max(-127, Math.min(127, numeric)), 0x80);
+  const rounded = Math.max(-255, Math.min(255, Math.round(numeric)));
+  if (rounded >= -64 && rounded <= 127) {
+    return Buffer.from([rounded < 0 ? 0xc0 + rounded : rounded]);
+  }
+  if (rounded >= 128) {
+    return Buffer.from([0xe0, rounded & 0xff]);
+  }
+  return Buffer.from([0xef, (-rounded) & 0xff]);
 }
 
 function clampInputAxis(value, maxAxis = 127) {
@@ -1283,6 +1313,75 @@ function clampInputAxis(value, maxAxis = 127) {
     return 0;
   }
   return Math.max(-limit, Math.min(limit, numeric));
+}
+
+function sanitizeControlAimAxis(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || Math.abs(numeric) < CONTROL_AIM_DEADZONE) {
+    return 0;
+  }
+  return clampInputAxis(numeric, CONTROL_AIM_MAX_AXIS);
+}
+
+function randomUnit() {
+  try {
+    return crypto.randomInt(0, 1_000_000) / 1_000_000;
+  } catch (err) {
+    return Math.random();
+  }
+}
+
+function randomBetween(min, max) {
+  const low = Number(min);
+  const high = Number(max);
+  if (!Number.isFinite(low) || !Number.isFinite(high)) {
+    return 0;
+  }
+  if (high <= low) {
+    return low;
+  }
+  return low + randomUnit() * (high - low);
+}
+
+function randomDiskPoint(radius) {
+  const limit = Math.max(0, Number(radius) || 0);
+  if (limit <= 0) {
+    return { x: 0, y: 0 };
+  }
+  const angle = randomUnit() * Math.PI * 2;
+  const distance = Math.sqrt(randomUnit()) * limit;
+  return {
+    x: Math.cos(angle) * distance,
+    y: Math.sin(angle) * distance
+  };
+}
+
+function randomAimVector(axis) {
+  const limit = Math.max(1, Number(axis) || 1);
+  const angle = randomUnit() * Math.PI * 2;
+  return {
+    x: Math.cos(angle) * limit,
+    y: Math.sin(angle) * limit
+  };
+}
+
+function stableHashNumber(text) {
+  const hash = crypto.createHash('sha256').update(String(text || '')).digest();
+  return hash.readUInt32LE(0);
+}
+
+function stableFormationOffset(id, radius) {
+  const limit = Math.max(0, Number(radius) || 0);
+  if (limit <= 0) {
+    return { x: 0, y: 0 };
+  }
+  const hash = stableHashNumber(id);
+  const angle = (hash % 360) / 360 * Math.PI * 2;
+  const ring = 0.65 + ((hash >>> 9) % 35) / 100;
+  return {
+    x: Math.cos(angle) * limit * ring,
+    y: Math.sin(angle) * limit * ring
+  };
 }
 
 function resolveManualScale(value, fallback) {
@@ -1299,6 +1398,17 @@ function clampManualScale(value) {
     return null;
   }
   return Math.max(MANUAL_SCALE_MIN, Math.min(MANUAL_SCALE_MAX, numeric));
+}
+
+function usableManualScaleSample(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  if (numeric <= MANUAL_SCALE_MIN || numeric >= MANUAL_SCALE_MAX) {
+    return null;
+  }
+  return numeric;
 }
 
 function decodeRawFloatPosition(plaintext, commandByte) {
@@ -1326,10 +1436,19 @@ function decodeUpdatePositionPacket(plaintext) {
 
 function buildInputPacket(controlState, botPosition = null) {
   const manualMode = Boolean(controlState && controlState.manualMode);
+  const ignoreControllerAim = Boolean(controlState && controlState.ignoreControllerAim);
   let mouseX = controlState && Number.isFinite(controlState.mouseX) ? controlState.mouseX : 0;
   let mouseY = controlState && Number.isFinite(controlState.mouseY) ? controlState.mouseY : 0;
+  if (ignoreControllerAim) {
+    mouseX = clampInputAxis(Number(controlState.manualFallbackAimX) || 0);
+    mouseY = clampInputAxis(Number(controlState.manualFallbackAimY) || 0);
+  }
   let movementFlags = 0;
   let manualDebug = null;
+  if (manualMode && ignoreControllerAim && controlState && controlState.manualAimWithMovement !== false) {
+    mouseX = clampInputAxis(Number(controlState.manualFallbackAimX) || 0);
+    mouseY = clampInputAxis(Number(controlState.manualFallbackAimY) || 0);
+  }
   if (
     controlState &&
     manualMode &&
@@ -1360,6 +1479,12 @@ function buildInputPacket(controlState, botPosition = null) {
     const dx = targetDriveX - botPosition.x;
     const dy = targetDriveY - botPosition.y;
     const distance = Math.hypot(dx, dy);
+    let aimUnitX = Number.isFinite(controlState.lastManualUnitX) ? controlState.lastManualUnitX : 0;
+    let aimUnitY = Number.isFinite(controlState.lastManualUnitY) ? controlState.lastManualUnitY : 0;
+    if (distance > 0.001) {
+      aimUnitX = dx / distance;
+      aimUnitY = dy / distance;
+    }
     const closeRatio = distance >= slowDistance ? 1 : Math.max(0, (distance - stopDistance) / (slowDistance - stopDistance));
     const pulseWindow = Math.max(MOVEMENT_INTERVAL_MS, 180);
     const pulsePhase = ((Date.now() + (process.pid % 37)) % pulseWindow) / pulseWindow;
@@ -1406,10 +1531,16 @@ function buildInputPacket(controlState, botPosition = null) {
         movementY: 0
       };
     }
+    if (controlState.manualAimWithMovement !== false) {
+      mouseX = clampInputAxis(aimUnitX * MANUAL_AIM_AXIS + (Number(controlState.manualAimOffsetX) || 0));
+      mouseY = clampInputAxis(aimUnitY * MANUAL_AIM_AXIS + (Number(controlState.manualAimOffsetY) || 0));
+    }
     manualDebug = {
       ...manualDebug,
       targetX: controlState.manualX,
       targetY: controlState.manualY,
+      targetOffsetX: Number(controlState.manualTargetOffsetX) || 0,
+      targetOffsetY: Number(controlState.manualTargetOffsetY) || 0,
       scaleX: manualScaleX,
       scaleY: manualScaleY,
       targetInternalX: targetX,
@@ -1425,6 +1556,10 @@ function buildInputPacket(controlState, botPosition = null) {
       stopDistance,
       slowDistance,
       pulseDuty,
+      aimUnitX,
+      aimUnitY,
+      aimOffsetX: Number(controlState.manualAimOffsetX) || 0,
+      aimOffsetY: Number(controlState.manualAimOffsetY) || 0,
       movementFlags
     };
   }
@@ -1439,18 +1574,27 @@ function buildInputPacket(controlState, botPosition = null) {
   if (controlState && controlState.autospin) {
     flags |= 0x08;
   }
-  const packet = Buffer.from([
-    0x43,
-    encodeInputAxis(mouseX),
-    encodeInputAxis(mouseY),
-    flags & 0xff
+  const rawMouseX = mouseX;
+  const rawMouseY = mouseY;
+  mouseX = sanitizeControlAimAxis(mouseX);
+  mouseY = sanitizeControlAimAxis(mouseY);
+  const packet = concatBytes([
+    Buffer.from([0x43]),
+    encodeInputNumber(mouseX),
+    encodeInputNumber(mouseY),
+    encodeInputNumber(flags & 0xff)
   ]);
   packet.manualDebug = manualDebug ? { ...manualDebug, mouseX, mouseY, flags: flags & 0xff } : null;
+  if (Math.abs(rawMouseX - mouseX) > 0.5 || Math.abs(rawMouseY - mouseY) > 0.5) {
+    packet.aimDebug = { rawMouseX, rawMouseY, mouseX, mouseY };
+  }
   return packet;
 }
 
 class ProtocolOnlyRandomClient {
   constructor(socketUrl, options = {}) {
+    this.clientLogId = process.env.ARRAS_CLIENT_LOG_ID || String(nextClientLogId++);
+    this.logPrefix = `[c${this.clientLogId}]`;
     this.socketUrl = socketUrl;
     this.options = options;
     this.state = 'idle';
@@ -1512,7 +1656,29 @@ class ProtocolOnlyRandomClient {
     this.lastDistinctPositionAt = 0;
     this.lastMovementHex = '';
     this.lastMovementLogAt = 0;
+    this.lastManualControlSentAt = 0;
     this.lastAutofireState = false;
+    this.lastAutofireWanted = false;
+    this.autofireChangeReadyAt = 0;
+    this.lastInputHadActiveControl = false;
+    this.movementIntervalMs = Math.max(1, Math.round(MOVEMENT_INTERVAL_MS + (Math.random() * 2 - 1) * Math.max(0, MOVEMENT_JITTER_MS)));
+    this.movementPhaseDelayMs = Math.floor(Math.random() * Math.max(0, MOVEMENT_PHASE_JITTER_MS + 1));
+    const formationOffset = stableFormationOffset(this.clientLogId, MANUAL_FORMATION_SPREAD);
+    this.manualFormationOffsetX = formationOffset.x;
+    this.manualFormationOffsetY = formationOffset.y;
+    this.manualTargetOffsetX = formationOffset.x;
+    this.manualTargetOffsetY = formationOffset.y;
+    this.manualAimOffsetX = 0;
+    this.manualAimOffsetY = 0;
+    this.manualFallbackAimX = 0;
+    this.manualFallbackAimY = 0;
+    this.nextManualTargetOffsetAt = 0;
+    this.nextManualAimOffsetAt = 0;
+    this.rawMouseDown = false;
+    this.fireHoldStartedAt = 0;
+    this.fireStartDelayMs = Math.floor(Math.random() * Math.max(0, FIRE_STAGGER_MS + 1));
+    this.firePauseUntil = 0;
+    this.nextFirePauseAt = 0;
     this.calibratedManualScaleX = null;
     this.calibratedManualScaleY = null;
     this.lastManualScaleCalibrationAt = 0;
@@ -1554,8 +1720,20 @@ class ProtocolOnlyRandomClient {
     this.pingTemplate = options.pingTemplate || latestPingTemplateFromLog(this.captureHash);
     this.spawnExtraFields = Array.isArray(options.spawnExtraFields) ? options.spawnExtraFields : DEFAULT_SPAWN_EXTRA_FIELDS;
     if (this.captureHash) {
-      console.log(`[INFO] validation-R live-only hash=${this.captureHash} source=${this.validationRValueSource} value=${this.validationRValue || '(none)'}`);
+      this.log(`[INFO] validation-R live-only hash=${this.captureHash} source=${this.validationRValueSource} value=${this.validationRValue || '(none)'}`);
     }
+  }
+
+  log(message) {
+    console.log(`${this.logPrefix} ${message}`);
+  }
+
+  error(message, detail = null) {
+    if (detail === null || detail === undefined) {
+      console.error(`${this.logPrefix} ${message}`);
+      return;
+    }
+    console.error(`${this.logPrefix} ${message}`, detail);
   }
 
   refreshTemplatesForHash(captureHash) {
@@ -1581,7 +1759,7 @@ class ProtocolOnlyRandomClient {
     this.helloTemplate = this.helloTemplate || (USE_CAPTURED_K ? latestCommandTemplateFromLog('k', captureHash) : null);
     this.spawnTemplate = this.spawnTemplate || explicitSpawnTemplateFromEnv() || bestSpawnTemplateFromLog(captureHash);
     this.pingTemplate = this.pingTemplate || latestPingTemplateFromLog(captureHash);
-    console.log(`[INFO] validation-R live-only hash=${captureHash} source=${this.validationRValueSource} value=${this.validationRValue || '(none)'}`);
+    this.log(`[INFO] validation-R live-only hash=${captureHash} source=${this.validationRValueSource} value=${this.validationRValue || '(none)'}`);
   }
 
   deriveDefaultSpawnName() {
@@ -1600,11 +1778,11 @@ class ProtocolOnlyRandomClient {
 
   async connect() {
     this.connectAttempt++;
-    console.log(`Using socket URL: ${this.socketUrl}${this.connectAttempt > 1 ? ` attempt=${this.connectAttempt}` : ''}`);
+    this.log(`Using socket URL: ${this.socketUrl}${this.connectAttempt > 1 ? ` attempt=${this.connectAttempt}` : ''}`);
     this.state = 'opening';
     const proxy = await buildProxyAgent();
     if (proxy) {
-      console.log(`Using proxy: ${proxy.url}`);
+      this.log(`Using proxy: ${proxy.url}`);
     }
     this.socket = new WebSocket(this.socketUrl, DEFAULT_PROTOCOLS, {
       agent: proxy ? proxy.agent : undefined,
@@ -1620,14 +1798,14 @@ class ProtocolOnlyRandomClient {
     const durationMs = this.options.durationMs;
     if (durationMs > 0) {
       this.shutdownTimer = setTimeout(() => {
-        console.log(`Test duration ${durationMs}ms reached; closing.`);
+        this.log(`Test duration ${durationMs}ms reached; closing.`);
         this.close();
       }, durationMs);
     }
   }
 
   onOpen() {
-    console.log('WebSocket open; sending session open packet.');
+    this.log('WebSocket open; sending session open packet.');
     this.openedAt = Date.now();
     this.state = 'awaiting-challenge';
     this.sendRaw(buildOpenPacket(this.socketUrl));
@@ -1767,7 +1945,7 @@ class ProtocolOnlyRandomClient {
           this.updateLivePosition(position);
           if (!this.loggedBotPosition) {
             this.loggedBotPosition = true;
-            console.log(`[INFO] bot-position x=${position.x.toFixed(1)} y=${position.y.toFixed(1)}`);
+            this.log(`[INFO] bot-position x=${position.x.toFixed(1)} y=${position.y.toFixed(1)}`);
           }
         }
       }
@@ -1804,7 +1982,7 @@ class ProtocolOnlyRandomClient {
           const now = Date.now();
           if (now - this.lastUPositionLogAt > U_POSITION_LOG_MS) {
             this.lastUPositionLogAt = now;
-            console.log(`[INFO] u-position x=${this.botPosition.x.toFixed(1)} y=${this.botPosition.y.toFixed(1)} mode=${U_POSITION_MODE} len=${plaintext.length}`);
+          this.log(`[INFO] u-position x=${this.botPosition.x.toFixed(1)} y=${this.botPosition.y.toFixed(1)} mode=${U_POSITION_MODE} len=${plaintext.length}`);
           }
         }
       }
@@ -1857,12 +2035,12 @@ class ProtocolOnlyRandomClient {
       ) {
         this.spawnLikelyAccepted = true;
         this.lastLivePositionAt = Date.now();
-        console.log(`[INFO] post-spawn accept detected via cmd=${command}; real in-game state.`);
+        this.log(`[INFO] post-spawn accept detected via cmd=${command}; real in-game state.`);
         this.ensureRespawnWatchdog();
         this.scheduleClassUpgrade('post-spawn');
       }
       if (!(command === 'u' && this.options.logU === false)) {
-        console.log(summarizePacket('IN', this.packetIndex, plaintext));
+        this.log(summarizePacket('IN', this.packetIndex, plaintext));
       }
     } catch (error) {
       if (error && error.message === 'Socket is not open' && (!this.socket || this.socket.readyState >= WebSocket.CLOSING)) {
@@ -2192,7 +2370,7 @@ class ProtocolOnlyRandomClient {
     this.upgradeStarted = false;
     this.statBuildStarted = false;
     this.clearUpgradeTimers();
-    console.log(`[INFO] tank target=${tank}`);
+    this.log(`[INFO] tank target=${tank}`);
     if (this.spawnLikelyAccepted) {
       this.scheduleClassUpgrade('tankselect');
     }
@@ -2231,7 +2409,7 @@ class ProtocolOnlyRandomClient {
     this.validationRValue = null;
     this.validationRValueSource = 'live-missing';
     this.clearUpgradeTimers();
-    console.log(`[INFO] death detected; respawn scheduled mode=${AUTO_RESPAWN_MODE} tank=${this.targetTank} in=${AUTO_RESPAWN_DELAY_MS}ms reason=${JSON.stringify(reason)}`);
+    this.log(`[INFO] death detected; respawn scheduled mode=${AUTO_RESPAWN_MODE} tank=${this.targetTank} in=${AUTO_RESPAWN_DELAY_MS}ms reason=${JSON.stringify(reason)}`);
     this.respawnTimer = setTimeout(() => {
       this.respawnTimer = null;
       if (AUTO_RESPAWN_MODE !== 'same-socket') {
@@ -2307,7 +2485,7 @@ class ProtocolOnlyRandomClient {
   }
 
   reconnectForRespawn() {
-    console.log(`[INFO] reconnecting after death tank=${this.targetTank}`);
+    this.log(`[INFO] reconnecting after death tank=${this.targetTank}`);
     this.cleanupTimers();
     const oldSocket = this.socket;
     this.socket = null;
@@ -2323,12 +2501,12 @@ class ProtocolOnlyRandomClient {
           oldSocket.terminate();
         }
       } catch (error) {
-        console.log(`[INFO] old socket close during respawn failed: ${error && error.message ? error.message : error}`);
+        this.log(`[INFO] old socket close during respawn failed: ${error && error.message ? error.message : error}`);
       }
     }
     this.resetSessionStateForReconnect();
     this.connect().catch((error) => {
-      console.error('Respawn reconnect failed:', error && error.stack ? error.stack : error);
+      this.error('Respawn reconnect failed:', error && error.stack ? error.stack : error);
       process.exitCode = 1;
     });
   }
@@ -2367,8 +2545,8 @@ class ProtocolOnlyRandomClient {
     if (distance > MANUAL_SCALE_CALIBRATE_DISTANCE) {
       return;
     }
-    const sampleX = Math.abs(manualX) > 1 ? clampManualScale(position.x / manualX) : null;
-    const sampleY = Math.abs(manualY) > 1 ? clampManualScale(position.y / manualY) : null;
+    const sampleX = Math.abs(manualX) > 1 ? usableManualScaleSample(position.x / manualX) : null;
+    const sampleY = Math.abs(manualY) > 1 ? usableManualScaleSample(position.y / manualY) : null;
     if (sampleX === null && sampleY === null) {
       return;
     }
@@ -2449,7 +2627,7 @@ class ProtocolOnlyRandomClient {
     const pathSteps = tankPathFor(this.targetTank);
     if (!pathSteps.length) {
       this.upgradeStarted = true;
-      console.log(`[OUT] upgrade skipped tank=${this.targetTank} reason=no-path`);
+      this.log(`[OUT] upgrade skipped tank=${this.targetTank} reason=no-path`);
       const statTimer = setTimeout(() => {
         this.upgradeTimers.delete(statTimer);
         this.scheduleStatBuild('no-class-path');
@@ -2458,7 +2636,7 @@ class ProtocolOnlyRandomClient {
       return;
     }
     this.upgradeStarted = true;
-    console.log(`[OUT] upgrade schedule tank=${this.targetTank} steps=${pathSteps.map(formatUpgradeStep).join('')} via=${reason}`);
+    this.log(`[OUT] upgrade schedule tank=${this.targetTank} steps=${pathSteps.map(formatUpgradeStep).join('')} via=${reason}`);
     let offset = 1200;
     for (const step of pathSteps) {
       const timer = setTimeout(() => {
@@ -2512,18 +2690,18 @@ class ProtocolOnlyRandomClient {
     const steps = buildStatUpgradeSteps(this.targetTank, feedMode);
     this.statBuildStarted = true;
     if (!steps.length) {
-      console.log(`[OUT] stat-build skipped tank=${this.targetTank} reason=no-build`);
+      this.log(`[OUT] stat-build skipped tank=${this.targetTank} reason=no-build`);
       return;
     }
-    console.log(`[OUT] stat-build schedule tank=${this.targetTank} feed=${feedMode} count=${steps.length} summary=${summarizeStatUpgradeSteps(steps)} via=${reason}`);
-    let offset = 0;
+    this.log(`[OUT] stat-build schedule tank=${this.targetTank} feed=${feedMode} count=${steps.length} summary=${summarizeStatUpgradeSteps(steps)} via=${reason}`);
+    let offset = Math.floor(Math.random() * Math.max(0, STAT_BUILD_START_JITTER_MS + 1));
     for (const statIndex of steps) {
       const timer = setTimeout(() => {
         this.upgradeTimers.delete(timer);
         this.sendStatUpgradeStep(statIndex);
       }, offset);
       this.upgradeTimers.add(timer);
-      offset += 90;
+      offset += 90 + Math.floor(Math.random() * Math.max(0, STAT_BUILD_STEP_JITTER_MS + 1));
     }
   }
 
@@ -2546,30 +2724,100 @@ class ProtocolOnlyRandomClient {
     this.upgradeTimers.clear();
   }
 
+  refreshManualSpread(now) {
+    if (now >= this.nextManualTargetOffsetAt) {
+      const base = randomDiskPoint(MANUAL_TARGET_SPREAD);
+      const wobble = randomDiskPoint(MANUAL_TARGET_SPREAD_WOBBLE);
+      this.manualTargetOffsetX = this.manualFormationOffsetX + base.x + wobble.x;
+      this.manualTargetOffsetY = this.manualFormationOffsetY + base.y + wobble.y;
+      this.nextManualTargetOffsetAt = now + randomBetween(
+        MANUAL_TARGET_SPREAD_REFRESH_MS * 0.75,
+        MANUAL_TARGET_SPREAD_REFRESH_MS * 1.25
+      );
+    }
+    if (now >= this.nextManualAimOffsetAt) {
+      const base = randomDiskPoint(MANUAL_AIM_SPREAD);
+      const wobble = randomDiskPoint(MANUAL_AIM_SPREAD_WOBBLE);
+      const fallback = randomAimVector(MANUAL_AIM_AXIS);
+      this.manualAimOffsetX = base.x + wobble.x;
+      this.manualAimOffsetY = base.y + wobble.y;
+      this.manualFallbackAimX = fallback.x + this.manualAimOffsetX;
+      this.manualFallbackAimY = fallback.y + this.manualAimOffsetY;
+      this.nextManualAimOffsetAt = now + randomBetween(
+        MANUAL_AIM_SPREAD_REFRESH_MS * 0.75,
+        MANUAL_AIM_SPREAD_REFRESH_MS * 1.25
+      );
+    }
+  }
+
+  resolveMouseDown(rawMouseDown, now) {
+    const pressed = Boolean(rawMouseDown);
+    if (!pressed) {
+      this.rawMouseDown = false;
+      this.fireHoldStartedAt = 0;
+      this.firePauseUntil = 0;
+      this.nextFirePauseAt = 0;
+      return false;
+    }
+    if (!this.rawMouseDown) {
+      this.rawMouseDown = true;
+      this.fireHoldStartedAt = now;
+      this.fireStartDelayMs = Math.floor(Math.random() * Math.max(0, FIRE_STAGGER_MS + 1));
+      this.nextFirePauseAt = now + randomBetween(FIRE_MICRO_PAUSE_INTERVAL_MIN_MS, FIRE_MICRO_PAUSE_INTERVAL_MAX_MS);
+    }
+    if (now - this.fireHoldStartedAt < this.fireStartDelayMs) {
+      return false;
+    }
+    if (FIRE_MICRO_PAUSE_ENABLED) {
+      if (now < this.firePauseUntil) {
+        return false;
+      }
+      if (this.nextFirePauseAt > 0 && now >= this.nextFirePauseAt) {
+        this.firePauseUntil = now + randomBetween(FIRE_MICRO_PAUSE_MIN_MS, FIRE_MICRO_PAUSE_MAX_MS);
+        this.nextFirePauseAt = this.firePauseUntil + randomBetween(FIRE_MICRO_PAUSE_INTERVAL_MIN_MS, FIRE_MICRO_PAUSE_INTERVAL_MAX_MS);
+        return false;
+      }
+    }
+    return true;
+  }
+
   updateControlState(message) {
     if (!message || message.type !== 'position') {
       return;
     }
+    const now = Date.now();
+    const manualMode = Boolean(message.manualMode);
+    this.refreshManualSpread(now);
+    const manualX = Number(message.manualX);
+    const manualY = Number(message.manualY);
     this.controlState = {
       x: Number(message.x),
       y: Number(message.y),
       mouseX: Number(message.mouseX),
       mouseY: Number(message.mouseY),
-      mouseDown: Boolean(message.mouseDown),
+      mouseDown: this.resolveMouseDown(message.mouseDown, now),
       rMouseDown: Boolean(message.rMouseDown),
       mouse: Boolean(message.mouse),
       feeding: Boolean(message.feeding),
       shift: Boolean(message.shift),
       autofire: Boolean(message.autofire),
       autospin: Boolean(message.autospin),
-      manualMode: Boolean(message.manualMode),
-      manualX: Number(message.manualX),
-      manualY: Number(message.manualY),
-      manualScaleX: Number(message.manualScaleX),
-      manualScaleY: Number(message.manualScaleY),
-      calibratedManualScaleX: this.calibratedManualScaleX,
-      calibratedManualScaleY: this.calibratedManualScaleY,
-      updatedAt: Date.now()
+      manualMode,
+      ignoreControllerAim: manualMode && MANUAL_AIM_WITH_MOVEMENT,
+      manualX: manualMode && Number.isFinite(manualX) ? manualX + this.manualTargetOffsetX : manualX,
+      manualY: manualMode && Number.isFinite(manualY) ? manualY + this.manualTargetOffsetY : manualY,
+      manualTargetOffsetX: manualMode ? this.manualTargetOffsetX : 0,
+      manualTargetOffsetY: manualMode ? this.manualTargetOffsetY : 0,
+      manualAimOffsetX: this.manualAimOffsetX,
+      manualAimOffsetY: this.manualAimOffsetY,
+      manualFallbackAimX: this.manualFallbackAimX,
+      manualFallbackAimY: this.manualFallbackAimY,
+      manualAimWithMovement: MANUAL_AIM_WITH_MOVEMENT,
+      manualScaleX: MANUAL_TARGET_X_SCALE,
+      manualScaleY: MANUAL_TARGET_Y_SCALE,
+      calibratedManualScaleX: MANUAL_SCALE_AUTO_CALIBRATE ? this.calibratedManualScaleX : null,
+      calibratedManualScaleY: MANUAL_SCALE_AUTO_CALIBRATE ? this.calibratedManualScaleY : null,
+      updatedAt: now
     };
     this.ensureMovementLoop();
   }
@@ -2578,33 +2826,73 @@ class ProtocolOnlyRandomClient {
     if (!MOVEMENT_ENABLED || this.movementTimer || MOVEMENT_INTERVAL_MS <= 0) {
       return;
     }
-    this.movementTimer = setInterval(() => {
+    const startLoop = () => {
+      if (this.movementTimer || !MOVEMENT_ENABLED) {
+        return;
+      }
       this.sendMovementInput();
-    }, MOVEMENT_INTERVAL_MS);
+      this.movementTimer = setInterval(() => {
+        this.sendMovementInput();
+      }, this.movementIntervalMs);
+    };
+    if (this.movementPhaseDelayMs > 0) {
+      this.movementTimer = setTimeout(() => {
+        this.movementTimer = null;
+        startLoop();
+      }, this.movementPhaseDelayMs);
+      return;
+    }
+    startLoop();
   }
 
   sendMovementInput() {
     if (!MOVEMENT_ENABLED || this.rejected || this.state !== 'ready' || !this.spawnLikelyAccepted || !this.controlState) {
       return;
     }
+    const now = Date.now();
     const hasPersistentManualTarget =
       this.controlState.manualMode &&
       Number.isFinite(this.controlState.manualX) &&
       Number.isFinite(this.controlState.manualY);
-    if (!hasPersistentManualTarget && Date.now() - this.controlState.updatedAt > 1000) {
-      return;
-    }
     const autofire = Boolean(this.controlState.autofire);
-    if (autofire !== this.lastAutofireState) {
+    if (autofire !== this.lastAutofireWanted) {
+      this.lastAutofireWanted = autofire;
+      this.autofireChangeReadyAt = now + Math.floor(Math.random() * Math.max(0, FIRE_STAGGER_MS + 1));
+    }
+    if (autofire !== this.lastAutofireState && now >= this.autofireChangeReadyAt) {
       if (this.sendPacket(AUTOFIRE_TOGGLE_PACKET)) {
-        console.log(`[OUT] autofire-toggle enabled=${autofire} hex=${AUTOFIRE_TOGGLE_PACKET.toString('hex')}`);
+        this.log(`[OUT] autofire-toggle enabled=${autofire} hex=${AUTOFIRE_TOGGLE_PACKET.toString('hex')}`);
       }
       this.lastAutofireState = autofire;
     }
+    const hasActiveControl =
+      hasPersistentManualTarget ||
+      Boolean(this.controlState.mouseDown) ||
+      Boolean(this.controlState.rMouseDown) ||
+      Boolean(this.controlState.autospin) ||
+      autofire;
+    const sendReleaseInput = this.lastInputHadActiveControl && !hasActiveControl;
+    if (!hasActiveControl && !sendReleaseInput) {
+      return;
+    }
+    if (!sendReleaseInput && !hasPersistentManualTarget && now - this.controlState.updatedAt > 1000) {
+      return;
+    }
+    const throttleManualControl =
+      hasPersistentManualTarget &&
+      !sendReleaseInput &&
+      MANUAL_CONTROL_INTERVAL_MS > 0 &&
+      now - this.lastManualControlSentAt < MANUAL_CONTROL_INTERVAL_MS;
+    if (throttleManualControl) {
+      return;
+    }
     const packet = buildInputPacket(this.controlState, this.botPosition);
     this.sendPacket(packet);
+    this.lastInputHadActiveControl = hasActiveControl;
+    if (hasPersistentManualTarget) {
+      this.lastManualControlSentAt = now;
+    }
     const hex = packet.toString('hex');
-    const now = Date.now();
     if (packet.manualDebug && this.botPosition && packet.manualDebug.distance > 0) {
       const elapsedSeconds = this.lastPositionEstimateAt ? Math.min(0.25, Math.max(0, (now - this.lastPositionEstimateAt) / 1000)) : MOVEMENT_INTERVAL_MS / 1000;
       this.lastPositionEstimateAt = now;
@@ -2621,7 +2909,7 @@ class ProtocolOnlyRandomClient {
     if (packet.manualDebug && now - (this.lastManualDebugAt || 0) > 1000) {
       this.lastManualDebugAt = now;
       const d = packet.manualDebug;
-      console.log(
+      this.log(
         `[INFO] manual-target target=(${d.targetX.toFixed(1)},${d.targetY.toFixed(1)}) ` +
         `scale=(${d.scaleX.toFixed(1)},${d.scaleY.toFixed(1)}) ` +
         `targetInternal=(${d.targetInternalX.toFixed(1)},${d.targetInternalY.toFixed(1)}) ` +
@@ -2633,10 +2921,18 @@ class ProtocolOnlyRandomClient {
         `flags=0x${d.flags.toString(16).padStart(2, '0')} hex=${hex}`
       );
     }
+    if (packet.aimDebug && now - (this.lastAimDebugAt || 0) > 1000) {
+      this.lastAimDebugAt = now;
+      const d = packet.aimDebug;
+      this.log(
+        `[INFO] aim-clamped raw=(${d.rawMouseX.toFixed(1)},${d.rawMouseY.toFixed(1)}) ` +
+        `sent=(${d.mouseX.toFixed(1)},${d.mouseY.toFixed(1)})`
+      );
+    }
     if (hex !== this.lastMovementHex || now - this.lastMovementLogAt > 3000) {
       this.lastMovementHex = hex;
       this.lastMovementLogAt = now;
-      console.log(`[OUT] movement bytes=${packet.length} hex=${hex}`);
+      this.log(`[OUT] movement bytes=${packet.length} hex=${hex}`);
     }
   }
 

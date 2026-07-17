@@ -234,11 +234,26 @@
             /^\[OUT\] fingerprint/.test(line) ||
             /^\[stderr\]/.test(line);
 
+        const runtimeLogFiles = [
+            "protocol-only-child.log",
+            "protocol-only-validation.ndjson",
+            "validation-inbound.ndjson",
+            "protocol-only-u-samples.ndjson",
+            "protocol-only-last-e.txt",
+            "protocol-only-last-e.json",
+            "protocol-only-last-k.txt"
+        ];
+
+        for (const file of runtimeLogFiles) {
+            fs.writeFileSync(path.join(__dirname, file), "");
+        }
+
         const childLogPath = path.join(__dirname, "protocol-only-child.log");
         fs.writeFileSync(childLogPath, `[start-batch] count=${count} hash=${hash} socket=${socketUrl}\n`);
 
         for (let i = 0; i < count; i++) {
             const timer = setTimeout(() => {
+                const clientLogId = `${hash || "bot"}-${i + 1}`;
                 const child = childProcess.spawn(process.execPath, [scriptPath], {
                     cwd: __dirname,
                     env: {
@@ -248,15 +263,16 @@
                         ARRAS_BOT_NAME: botName,
                         ARRAS_PARTY: party,
                         ARRAS_LOG_U: "0",
+                        ARRAS_CLIENT_LOG_ID: clientLogId,
                         ARRAS_PROXY_URL: protocolProxyUrl
                     },
                     stdio: ["ignore", "pipe", "pipe", "ipc"]
                 });
 
                 session.protocolClients.add(child);
-                console.log(`[protocol-only] started pid=${child.pid} hash=${hash} name=${JSON.stringify(botName)}`);
+                console.log(`[protocol-only] started pid=${child.pid} id=${clientLogId} hash=${hash} name=${JSON.stringify(botName)}`);
                 sendProtocolChild(session, child, { type: "tankselect", tank: session.tank });
-                fs.appendFileSync(childLogPath, `[start] pid=${child.pid} hash=${hash} socket=${socketUrl}\n`);
+                fs.appendFileSync(childLogPath, `[start] pid=${child.pid} id=${clientLogId} hash=${hash} socket=${socketUrl}\n`);
                 child.stdout.on("data", (chunk) => {
                     String(chunk).split(/\r?\n/).filter(Boolean).forEach((line) => {
                         fs.appendFileSync(childLogPath, `[stdout] ${line}\n`);
