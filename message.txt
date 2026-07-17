@@ -637,7 +637,7 @@
 
                     <div class="k-slider-wrap">
                         <div class="k-slider-row">
-                            <span>Aim Smoothing</span>
+                            <span>Aim Strength</span>
                             <span class="k-val"><span id="sensitivityValue">20</span>%</span>
                         </div>
                         <input id="mouseSensitivity" type="range" min="1" max="100" step="1" value="20">
@@ -653,7 +653,7 @@
 
                     <div class="k-grid2">
                         <label class="k-toggle">
-                            <div class="k-tname small">🖱 Follow Mouse</div>
+                            <div class="k-tname small">🖱 Follow Parent</div>
                             <input id="mbs" type="checkbox" checked>
                             <div class="k-sw"></div>
                         </label>
@@ -669,6 +669,8 @@
                         <input id="manualMode" type="checkbox">
                         <div class="k-sw"></div>
                     </label>
+
+                    <div class="k-hint" id="coordModeHint" style="color:#fbbf24;">Press L in-game so coordinates are visible before using Follow Parent or Manual Coordinates.</div>
 
                     <div id="manualCoordsSection" style="display:none; flex-direction:column; gap:8px;">
                         <div class="k-lbl" style="color:#22d3ee;">Your current coordinates: <span id="currentCoordsDisplay">Not in game</span></div>
@@ -832,6 +834,7 @@
             manualY: $("manualY"),
             fillCoordsBtn: $("fillCoordsBtn"),
             goBtn: $("goBtn"),
+            coordModeHint: $("coordModeHint"),
             manualCoordsSection: $("manualCoordsSection"),
             mouseSensitivity: $("mouseSensitivity"),
             sensitivityValue: $("sensitivityValue"),
@@ -887,6 +890,7 @@
 
         HTML.goBtn.addEventListener('click', () => {
             HTML.manualMode.checked = true;
+            HTML.mbs.checked = false;
             HTML.manualCoordsSection.style.display = "flex";
             manualActive = true;
             saveSettings();
@@ -896,10 +900,23 @@
         });
 
         HTML.manualMode.onchange = () => {
+            if (HTML.manualMode.checked) {
+                HTML.mbs.checked = false;
+                setPositionDisplay("Press L in-game so coordinates are visible.");
+            }
             HTML.manualCoordsSection.style.display = HTML.manualMode.checked ? "flex" : "none";
             if (!HTML.manualMode.checked) {
                 manualActive = false;
             }
+        };
+        HTML.mbs.onchange = () => {
+            if (HTML.mbs.checked) {
+                HTML.manualMode.checked = false;
+                HTML.manualCoordsSection.style.display = "none";
+                manualActive = false;
+                setPositionDisplay("Press L in-game so coordinates are visible.");
+            }
+            saveSettings();
         };
         HTML.antiInviToggle.onchange = e => {
             window.antiInviActive = e.target.checked;
@@ -1277,7 +1294,7 @@
             saveSettings();
             if (HTML.repeatChat.checked) packetToAll("T", HTML.chatMessage.value.trim(), true);
         });
-        [HTML.autofire, HTML.autospin, HTML.mbs, HTML.feeding, HTML.manualMode].forEach(el => el.addEventListener('change', saveSettings));
+        [HTML.autofire, HTML.autospin, HTML.feeding, HTML.manualMode].forEach(el => el.addEventListener('change', saveSettings));
         HTML.repeatChat.addEventListener('change', () => {
             saveSettings();
             HTML.broadcastBtn.click();
@@ -1334,6 +1351,10 @@
             mouseY = 0,
             mouseDown = false,
             rMouseDown = false;
+        let lastAimX = 0,
+            lastAimY = -80;
+        const AIM_AXIS_MAX = 126;
+        const AIM_DEADZONE_PIXELS = 10;
         window.addEventListener("mousedown", e => {
             if (e.button == 0) mouseDown = true;
             else if (e.button == 2) rMouseDown = true;
@@ -1346,6 +1367,20 @@
             mouseX = e.clientX - (window.innerWidth / 2);
             mouseY = e.clientY - (window.innerHeight / 2);
         });
+
+        function getSafeAim(div) {
+            const dx = Number.isFinite(mouseX) ? mouseX : 0;
+            const dy = Number.isFinite(mouseY) ? mouseY : 0;
+            const distance = Math.hypot(dx, dy);
+            if (distance < AIM_DEADZONE_PIXELS) {
+                return [lastAimX, lastAimY];
+            }
+            const strength = Math.max(1, Math.min(100, Number(div) || 20));
+            const magnitude = Math.max(70, Math.min(AIM_AXIS_MAX, 130 - strength * 0.4));
+            lastAimX = dx / distance * magnitude;
+            lastAimY = dy / distance * magnitude;
+            return [lastAimX, lastAimY];
+        }
 
         function packetToAll(...args) {
             const enc = msgpack.encode(args);
@@ -1460,16 +1495,22 @@
 
             const div = parseFloat(HTML.mouseSensitivity.value) || 20;
             const uiManualActive = HTML.manualMode.checked && manualActive;
+            const hasFreshParentPosition = x !== null && y !== null && positionFreshUntil >= performance.now();
+            const followParentActive = HTML.mbs.checked && hasFreshParentPosition;
+            const targetModeActive = uiManualActive || followParentActive;
+            const targetX = followParentActive ? x : (uiManualActive ? parseFloat(HTML.manualX.value) || 0 : 0);
+            const targetY = followParentActive ? y : (uiManualActive ? parseFloat(HTML.manualY.value) || 0 : 0);
+            const aim = getSafeAim(div);
             packetToAll("A",
                 x, y,
-                mouseX / div,
-                mouseY / div,
+                aim[0],
+                aim[1],
                 mouseDown, rMouseDown,
                 HTML.mbs.checked, HTML.feeding.checked, keys["ShiftLeft"],
                 HTML.autofire.checked, HTML.autospin.checked,
-                uiManualActive,
-                uiManualActive ? parseFloat(HTML.manualX.value) || 0 : 0,
-                uiManualActive ? parseFloat(HTML.manualY.value) || 0 : 0,
+                targetModeActive,
+                targetX,
+                targetY,
                 [],
                 MANUAL_COORD_SCALE,
                 MANUAL_COORD_SCALE
